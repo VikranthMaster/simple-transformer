@@ -1,285 +1,224 @@
-English → German Transformer from Scratch
+```markdown
+# English → German Transformer from Scratch
 
-A from-scratch implementation of an Encoder–Decoder Transformer for English-to-German machine translation using PyTorch. The project implements the Transformer architecture, tokenization, dataset preparation, training pipeline, greedy decoding, and beam-search decoding without relying on PyTorch's built-in Transformer modules.
+A from-scratch implementation of an **Encoder–Decoder Transformer** for English-to-German machine translation using PyTorch. 
 
-The model was designed and trained with memory efficiency and numerical stability in mind, making it suitable for training on a 4 GB GPU such as the NVIDIA GTX 1650.
+This project implements the core Transformer architecture, custom BPE tokenization, dataset preparation, a custom training pipeline, greedy decoding, and beam-search decoding without relying on PyTorch's built-in `nn.Transformer` modules.
 
-✨ Features
+The model was explicitly designed and stabilized for **memory efficiency and numerical stability** on a low-VRAM GPU without Tensor Cores (e.g., a 4 GB NVIDIA GTX 1650).
 
-- Transformer Encoder–Decoder architecture implemented from scratch
-- Multi-Head Self-Attention
-- Cross-Attention between encoder and decoder
-- Sinusoidal positional encoding
-- Pre-Norm Transformer blocks for improved training stability
-- Teacher-forcing during training
-- Padding and causal attention masks
-- Greedy decoding
-- Beam-search decoding
-- Custom dataset and batch collation pipeline
-- No mixed-precision dependency
-- NaN/Inf loss protection
-- No PyTorch "nn.Transformer" used
+---
 
-🏗️ Architecture
+## ✨ Features
 
-The model follows the original Encoder–Decoder Transformer design:
+- **Custom Encoder–Decoder**: Multi-Head Self-Attention, Cross-Attention, and Feed-Forward networks written from scratch.
+- **4GB GPU Optimized**: Model dimensions scaled down (`d_model=256`, 4 layers) and uses Gradient Accumulation (effective batch size of 128) to prevent OOM errors.
+- **Extreme Training Stability**: 
+  - **Pre-Norm Architecture:** LayerNorm applied *before* attention/FFN to prevent gradient explosion.
+  - **NaN Guard:** Custom detection for fully-masked attention rows to prevent `softmax(-inf)` NaN poisoning.
+  - **Pure FP32 Training:** Intentional exclusion of mixed-precision (AMP) to avoid FP16 overflow on non-Tensor Core GPUs.
+- **Custom Tokenizer**: Trains a custom BPE tokenizer with a character-level whitespace pre-tokenizer directly on the training corpus.
+- **Decoding Algorithms**: Supports both Greedy Decoding and Length-Normalized Beam Search.
+- **Visualization**: Automated training history tracking and plotting.
 
-English Sentence
-│
-▼
-Tokenizer
-│
-▼
-Source Embeddings
-│
-▼
-Positional Encoding
-│
-▼
-┌─────────────────────┐
-│ Transformer │
-│ Encoder │
-│ │
-│ Multi-Head Attention│
-│ ↓ │
-│ Feed Forward │
-│ × N │
-└─────────────────────┘
-│
-│ Encoder Output
-▼
-┌─────────────────────┐
-│ Transformer │
-│ Decoder │
-│ │
-│ Masked Self-Attn │
-│ ↓ │
-│ Cross-Attention │
-│ ↓ │
-│ Feed Forward │
-│ × N │
-└─────────────────────┘
-│
-▼
-Linear Output Layer
-│
-▼
-German Tokens
+---
 
-Core Components
+## 🏗️ Architecture
 
-- Encoder: Processes the complete source sentence and produces contextual representations.
-- Decoder: Generates the German translation autoregressively.
-- Multi-Head Attention: Allows the model to attend to different parts of the sequence simultaneously.
-- Cross-Attention: Allows the decoder to attend to the encoder's representations.
-- Feed-Forward Network: Applies a position-wise nonlinear transformation.
-- Positional Encoding: Adds information about token positions.
-- Layer Normalization: Uses pre-normalization to improve gradient stability.
+```text
+                    English Sentence
+                           │
+                           ▼
+                   Custom BPE Tokenizer
+                           │
+                           ▼
+                    Token Embeddings
+                           │
+                           ▼
+                  Positional Encoding
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │        ENCODER         │
+              │                        │
+              │   Multi-Head Attention │
+              │            ↓           │
+              │     Feed Forward       │
+              │            ↓           │
+              │          × 4           │
+              └───────────┬────────────┘
+                          │
+                    Encoder Output
+                          │
+                          ▼
+              ┌────────────────────────┐
+              │        DECODER         │
+              │                        │
+              │   Masked Self-Attn     │
+              │            ↓           │
+              │    Cross Attention     │
+              │            ↓           │
+              │     Feed Forward       │
+              │            ↓           │
+              │          × 4           │
+              └───────────┬────────────┘
+                          │
+                          ▼
+                    Linear Output
+                          │
+                          ▼
+                   German Tokens
 
-🧠 Numerical Stability
+```
 
-Because this Transformer is implemented from scratch, additional care was taken to prevent unstable training.
+---
 
-Pre-Normalization
+## 🧠 Numerical Stability & GPU Constraints
 
-Each Transformer sub-layer applies LayerNorm before attention or feed-forward computation:
+Because this Transformer is implemented from scratch and targeted at older/smaller GPUs (like the GTX 1650), textbook implementations often fail with NaN losses. The following protections were built into `core.py` and `main.py`:
 
-x → LayerNorm → Attention → Residual
-x → LayerNorm → Feed Forward → Residual
+### 1. Pre-Normalization
 
-This generally provides more stable gradient flow than post-normalization for deep or from-scratch Transformer implementations.
+The model uses Pre-Norm instead of Post-Norm:
 
-Fully Masked Attention Protection
+* `x → LayerNorm → Attention → Residual`
+* `x → LayerNorm → Feed Forward → Residual`
+This keeps gradients much better behaved early in training and is the single biggest lever against NaN loss in from-scratch Transformers.
 
-Attention can produce NaNs when an entire attention row is masked:
+### 2. Fully-Masked Attention Protection
 
-softmax(-∞, -∞, -∞, ...) → NaN
+When applying padding masks, a query position might have no valid keys to attend to. The raw scores row becomes entirely `-inf`, and `softmax(-inf, -inf, ...)` equals `NaN`. The code detects fully-masked rows and zeros them out *before* softmax, replacing them with a harmless uniform distribution that gets discarded downstream.
 
-The implementation detects fully masked rows and replaces the scores with zeros before applying softmax.
+### 3. Pure FP32 Training
 
-FP32 Training
+The GTX 1650 (TU117 architecture) lacks Tensor Cores. PyTorch's `autocast()` (FP16 mixed precision) provides zero speedup on this hardware and introduces severe risks of FP16 overflow since attention logits can easily exceed FP16's ~65,504 limit. Training is locked to FP32.
 
-The training pipeline intentionally uses standard FP32 instead of automatic FP16 mixed precision. This avoids unnecessary numerical instability on GPUs without Tensor Cores.
+### 4. Gradient Accumulation
 
-📊 Training Results
+To simulate large batch sizes on 4GB VRAM, the training loop uses `BATCH_SIZE = 32` with `ACC_STEPS = 4`, achieving an effective batch size of 128.
 
-The following plot shows the training progress of the model:
+---
 
-"Training Curves" (training_curves.png)
+## ⚙️ Hyperparameters
 
-The curves can be used to monitor:
+| Parameter | Value | Description |
+| --- | --- | --- |
+| `D_MODEL` | 256 | Embedding dimension |
+| `NUM_HEADS` | 8 | Attention heads |
+| `NUM_LAYERS` | 4 | Encoder and Decoder layers |
+| `D_FF` | 1024 | Feed-forward hidden dimension |
+| `MAX_LEN` | 32 | Maximum sequence length |
+| `EFFECTIVE_BATCH` | 128 | 32 (batch) × 4 (accum steps) |
+| `NUM_EPOCHS` | 25 | Total training epochs |
+| `NUM_MERGES` | 37,000 | BPE Tokenizer merges |
 
-- Training loss
-- Validation loss
-- Training/validation behavior over epochs
-- Potential overfitting or instability
+---
 
-🔤 Data Processing
+## 📊 Training Results
 
-Each English/German sentence pair is converted into three sequences:
+The model was trained for **25 epochs**.
 
-Encoder Input
+* **Final Training Loss**: ~3.95
+* **Final Validation Loss**: ~3.93
+* **Final Token Accuracy**: ~49.98%
 
-[source tokens] + </s>
+*The plot above is automatically generated by `plotgraph.py` reading from the CSV history logs.*
 
-Decoder Input
+---
 
-<s> + [target tokens]
+## 🔤 Data Processing & Tokenization
 
-Training Label
+The pipeline utilizes the HuggingFace `tokenizers` library to train a **Byte-Pair Encoding (BPE)** model on the combined English and German corpus.
 
-[target tokens] + </s>
+Sequences are processed as follows to enable teacher forcing:
 
-This enables standard teacher forcing, where the decoder receives the previous target tokens while learning to predict the next token.
+* **Encoder Input:** `[source tokens] + </s>`
+* **Decoder Input:** `<s> + [target tokens]`
+* **Training Label:** `[target tokens] + </s>`
 
-Sequences are dynamically padded within each batch.
+Two attention masks are generated on the fly:
 
-🎯 Attention Masks
+1. **Padding Mask:** Prevents attention to `<pad>` tokens.
+2. **Causal (Autoregressive) Mask:** A lower-triangular matrix that prevents the decoder from "looking ahead" at future tokens.
 
-The implementation uses two major types of masks.
+---
 
-Source Padding Mask
+## 📁 Project Structure
 
-Prevents the encoder and decoder cross-attention from attending to padding tokens.
-
-Causal Mask
-
-Prevents the decoder from seeing future tokens during training.
-
-For example:
-
-1 0 0 0
-1 1 0 0
-1 1 1 0
-1 1 1 1
-
-This forces the decoder to generate tokens autoregressively.
-
-🔎 Decoding
-
-Two decoding strategies are implemented.
-
-Greedy Decoding
-
-At every step, the token with the highest probability is selected:
-
-next_token = argmax(P(token | previous_tokens))
-
-This is fast but can produce suboptimal sequences.
-
-Beam Search
-
-Beam search maintains multiple candidate translations simultaneously.
-
-The implementation supports configurable beam width:
-
-BEAM_WIDTH = 4
-
-A length-normalized score is used to reduce the tendency of beam search to prefer very short sequences.
-
-📁 Project Structure
-
+```text
 .
-├── core.py
-├── demo.py
-├── tokenizer.json
-├── best_english_to_german_p2.pt
-├── training_curves.png
+├── core.py                       # Core Transformer architecture & utilities
+├── main.py                       # Training loop, dataset collation, tokenization
+├── demo.py                       # Interactive CLI translation interface
+├── plotgraph.py                  # Generates training_curves.png from CSV logs
+├── tokenizer.json                # Saved custom BPE tokenizer
+├── best_english_to_german_p2.pt  # Saved model weights & config
+├── final_history_training.csv    # Training metrics log
+├── training_curves.png           # Accuracy/Loss visualization
 └── README.md
 
-"core.py"
+```
 
-Contains the main implementation:
+---
 
-- Transformer encoder
-- Transformer decoder
-- Multi-head attention
-- Feed-forward networks
-- Positional encoding
-- Dataset helpers
-- Collation
-- Training/evaluation functions
-- Greedy decoding
-- Beam search
+## 🚀 Installation & Usage
 
-"demo.py"
+### 1. Install Dependencies
 
-Interactive translation script for testing the trained model.
+```bash
+pip install torch tokenizers pandas matplotlib tqdm
 
-"tokenizer.json"
+```
 
-Tokenizer used for converting English and German text into token IDs.
+### 2. Training the Model
 
-"best_english_to_german_p2.pt"
+Ensure your data (`train.csv`, `val.csv`, `test.csv` containing `en` and `de` columns) is located in the `./data` directory, then run:
 
-Trained model checkpoint containing the encoder, decoder, output layer, and model configuration.
+```bash
+python3 main.py
 
-⚙️ Installation
+```
 
-Clone the repository and install the required dependencies:
+*This will automatically train the tokenizer, filter sequences by length, begin the training loop, and save the best checkpoint.*
 
-git clone <your-repository-url>
-cd <repository-name>
+### 3. Plotting Training Curves
 
-pip install torch
-pip install tokenizers
-pip install tqdm
+To generate or update the loss and accuracy graphs from the CSV logs:
 
-🚀 Running the Translator
+```bash
+python3 plotgraph.py
 
-After placing the trained checkpoint and tokenizer in the project directory:
+```
 
+### 4. Interactive Translation (Inference)
+
+Run the demo script to test the model dynamically. It will load the checkpoint and run both Greedy and Beam Search decoding:
+
+```bash
 python3 demo.py
 
-Then enter an English sentence:
+```
+
+**Example output:**
+
+```text
+Using device: cuda
+Loaded checkpoint from 'best_english_to_german_p2.pt'
+
+Type an English sentence to translate. Type 'exit' or 'quit' to stop.
 
 EN> how are you today?
-
-The model produces translations using both decoding strategies:
-
 Greedy: wie geht es dir heute?
-Beam: wie geht es dir heute?
+Beam:   wie geht es dir heute?
 
-Type "exit" or "quit" to stop the program.
+```
 
-💻 Hardware
+---
 
-The implementation was optimized with a low-VRAM GPU in mind.
+## 📜 License
 
-Component| Configuration
-Framework| PyTorch
-GPU Target| NVIDIA GTX 1650 / similar 4 GB GPU
-Precision| FP32
-Architecture| Encoder–Decoder Transformer
-Decoding| Greedy + Beam Search
+This project is intended for educational and research purposes—specifically demonstrating how to overcome the hardware and numerical challenges of training large architectures from scratch.
 
-🛠️ Design Decisions
+```
 
-This project intentionally avoids using a high-level Transformer implementation so that the individual components can be studied and controlled directly.
-
-The implementation includes:
-
-- Custom attention calculations
-- Custom encoder/decoder layers
-- Explicit masking
-- Explicit residual connections
-- Custom training loop
-- Custom decoding algorithms
-
-This makes the project useful for understanding how Transformers work internally, rather than treating the Transformer as a black-box module.
-
-📌 Future Improvements
-
-- [ ] Add BLEU / SacreBLEU evaluation
-- [ ] Add label smoothing
-- [ ] Add learning-rate visualization
-- [ ] Add checkpoint resume support
-- [ ] Improve beam-search length normalization
-- [ ] Add batch inference
-- [ ] Experiment with larger datasets
-- [ ] Experiment with SentencePiece/BPE tokenizer configurations
-- [ ] Compare against PyTorch's built-in Transformer implementation
-
-📜 License
-
-This project is intended for educational and research purposes.
+```

@@ -181,6 +181,7 @@ python3 main.py
 *This will automatically train the tokenizer, filter sequences by length, begin the training loop, and save the best checkpoint.*
 
 ### 3. Plotting Training Curves
+![Training Curves](training_curves.png)
 
 To generate or update the loss and accuracy graphs from the CSV logs:
 

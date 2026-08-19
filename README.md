@@ -1,4 +1,3 @@
-```markdown
 # English → German Transformer from Scratch
 
 A from-scratch implementation of an **Encoder–Decoder Transformer** for English-to-German machine translation using PyTorch. 
